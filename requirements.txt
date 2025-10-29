@@ -1,0 +1,22 @@
+requests
+flask
+twilio
+python-telegram-bot==21.3
+httpx
+duckdb
+fastapi
+uvicorn
+
+# Go to your project folder
+cd dummy_services
+
+# Create virtual environment
+python3 -m venv venv
+
+# Activate it
+source venv/bin/activate      # Mac/Linux
+# OR
+venv\Scripts\activate         # Windows
+
+# Install dependencies
+pip install -r requirements.txt
