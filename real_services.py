@@ -423,32 +423,58 @@ def get_available_data_sizes(country_name):
 
 # ---------------- PRICE FETCH ----------------
 def get_price_for_plan(country_name, data_size):
-    """Return correct plan price, matching both data & validity."""
+    """Return correct plan price — handles Unlimited and validity."""
     print(f"[DEBUG] get_price_for_plan({country_name}, {data_size}) called")
     plans = get_plans_by_country(country_name)
     if not plans:
         print(f"[WARN] No plans found for {country_name}")
         return None
 
-    # Extract data (GB) and validity (Days)
-    parts = data_size.replace("🌐", "").replace("—", "-").split("-")
-    size_value = parts[0].strip().lower().replace("gb", "")
-    validity_value = None
-    if len(parts) > 1:
-        validity_value = "".join(ch for ch in parts[1] if ch.isdigit())
+    # 🧹 Normalize input (remove emojis, dashes, and extra words)
+    clean_data = (
+        str(data_size)
+        .replace("🌐", "")
+        .replace("—", "-")
+        .replace("data", "")
+        .replace("days", "")
+        .replace("unlimited", "unlimited")
+        .strip()
+        .lower()
+    )
 
+    size_value = None
+    validity_value = None
+
+    parts = clean_data.split("-")
+    if parts:
+        size_part = parts[0].strip()
+        if "gb" in size_part:
+            size_value = size_part.replace("gb", "").strip()
+        elif "unlimited" in size_part:
+            size_value = "unlimited"
+
+    # extract validity (if present)
+    if len(parts) > 1:
+        validity_value = "".join([ch for ch in parts[1] if ch.isdigit()])
+
+    # 🔍 Look for matching plan
     for p in plans:
         plan_name = str(p.get("name", "")).lower()
         plan_data = str(p.get("data", "")).strip().lower()
         plan_validity = str(p.get("validity", "")).strip().lower()
+        price = p.get("finalAmount") or p.get("price")
 
-        # ✅ Match both data and validity
+        # ✅ Unlimited match (covers both data=0 or “Unlimited”)
         if (
-            size_value == plan_data
-            or f"{size_value}gb" in plan_name
+            size_value == "unlimited"
+            and ("unlimited" in plan_name or plan_data == "0")
         ):
+            print(f"[MATCH ✅] Found Unlimited plan: {p.get('name')} → ₹{price}")
+            return price
+
+        # ✅ Numeric data + validity match
+        if size_value and plan_data == size_value:
             if not validity_value or validity_value == plan_validity:
-                price = p.get("finalAmount") or p.get("price")
                 print(f"[MATCH ✅] Found plan: {p.get('name')} → ₹{price}")
                 return price
 
