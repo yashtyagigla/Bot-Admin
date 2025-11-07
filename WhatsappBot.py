@@ -1,6 +1,6 @@
-# # # #!/usr/bin/env python3
-# # # # -*- coding: utf-8 -*-
-# # # # # #pip install flask twilio
+# # # # #!/usr/bin/env python3
+# # # # # -*- coding: utf-8 -*-
+# # # # # # #pip install flask twilio
 
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
@@ -8,10 +8,11 @@
 from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
 import requests
-import os
 import re
+import os
+from dotenv import load_dotenv
 
-# ---------- IMPORT YOUR EXISTING LOGIC ----------
+# ---- IMPORT SERVICES ----
 from real_services import (
     get_country_groups,
     get_countries_by_group,
@@ -20,13 +21,16 @@ from real_services import (
     get_price_for_plan,
 )
 from payu import generate_payu_link
-# ------------------------------------------------
+
+# ---- LOAD ENV ----
+load_dotenv()
+PASSPORT_UPLOAD_URL = "https://apiesim.connectingit.in/api/social/new"
 
 app = Flask(__name__)
 USER_STATE = {}
 
 # ===============================================================
-# 🧩 Helper: Send Twilio WhatsApp Response
+# 🧩 Helper: Twilio WhatsApp Response
 # ===============================================================
 def send_message(msg_text):
     resp = MessagingResponse()
@@ -35,7 +39,7 @@ def send_message(msg_text):
     return str(resp)
 
 # ===============================================================
-# 🟢 Restart / Start Flow
+# 🟢 Start / Restart Flow
 # ===============================================================
 def start_flow(from_number):
     USER_STATE[from_number] = {"step": "phone"}
@@ -47,7 +51,7 @@ def start_flow(from_number):
     return send_message(msg)
 
 # ===============================================================
-# 🔄 WhatsApp Webhook Endpoint
+# 🔄 Webhook: WhatsApp Entry Point
 # ===============================================================
 @app.route("/whatsapp", methods=["POST"])
 def whatsapp_reply():
@@ -55,15 +59,17 @@ def whatsapp_reply():
     body = request.form.get("Body", "").strip()
     state = USER_STATE.get(from_number, {})
 
-    # 1️⃣ Start or restart
-    if not state or re.match(r"^(hi|hello|start|restart|help|hey|yo|sup)$", body, re.I):
+    # 🟢 Start / Restart
+    if not state or re.match(r"^(hi|hello|start|restart|help|hey|yo)$", body, re.I):
         return start_flow(from_number)
 
-    # 2️⃣ Phone number
+    # 📞 PHONE NUMBER
     if state.get("step") == "phone":
         phone = re.sub(r"\D", "", body)
         if len(phone) < 7:
             return send_message("⚠️ Please enter a valid phone number (digits only).")
+
+        # keep format same as before
         state["phone"] = "+" + phone
         state["step"] = "country_group"
         USER_STATE[from_number] = state
@@ -74,12 +80,11 @@ def whatsapp_reply():
         msg += "\n\n✏️ Reply with the *number* or *group name* (e.g., 1 or A-C)"
         return send_message(msg)
 
-    # 3️⃣ Country group
+    # 🌍 COUNTRY GROUP
     if state.get("step") == "country_group":
         groups = get_country_groups()
         choice = body.strip().upper()
 
-        # Number or text
         if choice.isdigit() and 1 <= int(choice) <= len(groups):
             group = groups[int(choice) - 1]
         else:
@@ -93,51 +98,129 @@ def whatsapp_reply():
         countries = country_data["countries"]
         total_pages = country_data["total_pages"]
 
-        state["countries"] = countries  # store for numeric reply
+        state["countries"] = countries
         state["step"] = "country"
         USER_STATE[from_number] = state
 
         msg = f"🌍 *Choose a country from {group}* (Page 1 of {total_pages}):\n\n"
         msg += "\n".join([f"{i+1}. {c.get('flag', '🌐')} {c['name']}" for i, c in enumerate(countries[:10])])
-        msg += "\n\n✏️ Reply with the *number* or *country name*."
+        msg += "\n\n✏️ Reply with *number* or *country name*."
         return send_message(msg)
 
-    # 4️⃣ Country
+    # 4️⃣ Country — includes "next" pagination + strict validation
     if state.get("step") == "country":
         countries = state.get("countries", [])
-        choice = body.strip().title()
+        group = state.get("country_group", "")
+        current_page = state.get("page", 1)
+        total_pages = state.get("total_pages", 1)
+        choice = body.strip()
+
+        # If user types "next", go to next page
+        if choice.lower() == "next":
+            if current_page < total_pages:
+                next_page = current_page + 1
+                country_data = get_countries_by_group(group, page=next_page)
+                countries = country_data["countries"]
+                total_pages = country_data["total_pages"]
+
+                # Save next page info
+                state["countries"] = countries
+                state["page"] = next_page
+                state["total_pages"] = total_pages
+                USER_STATE[from_number] = state
+
+                msg = (
+                    f"🌍 *Choose a country from {group}* (Page {next_page} of {total_pages}):\n\n"
+                    + "\n".join(
+                        [f"{i+1}. {c.get('flag', '🌐')} {c['name']}" for i, c in enumerate(countries[:10])]
+                    )
+                    + "\n\n✏️ Reply with *number* or *country name*.\n"
+                    + "➡️ Or type *next* to see more countries."
+                )
+                return send_message(msg)
+            else:
+                return send_message("⚠️ You’re already on the last page of this group.")
+
+        # Validate country input (must be a number or matching name)
+        selected_country = None
 
         if choice.isdigit() and 1 <= int(choice) <= len(countries):
-            country = countries[int(choice) - 1]["name"]
+            selected_country = countries[int(choice) - 1]["name"]
         else:
+            # Match by name
             match = next((c["name"] for c in countries if c["name"].lower() == choice.lower()), None)
-            country = match or choice
+            if match:
+                selected_country = match
 
-        state["country"] = country
+        if not selected_country:
+            # invalid entry
+            msg = (
+                "⚠️ Invalid input.\n\n"
+                "Please reply with a *valid country number or name* from the list.\n"
+                "You can also type *next* to see more countries."
+            )
+            return send_message(msg)
+
+        # ✅ Valid country selected — proceed
+        state["country"] = selected_country
         state["step"] = "package"
         USER_STATE[from_number] = state
 
         packages = get_data_packages()
-        msg = f"🌎 *{country}* selected.\n\nPlease select your *package type:*\n"
-        msg += "\n".join([f"{i+1}. {p}" for i, p in enumerate(packages)])
-        msg += "\n\n✏️ Reply with *number* or *package name*."
+        msg = (
+            f"🌎 *{selected_country}* selected.\n\n"
+            "Please select your *package type:*\n"
+            + "\n".join([f"{i+1}. {p}" for i, p in enumerate(packages)])
+            + "\n\n✏️ Reply with *number* or *package name*."
+        )
         return send_message(msg)
 
-    # 5️⃣ Package
+        # 📦 PACKAGE
     if state.get("step") == "package":
         packages = get_data_packages()
-        choice = body.strip()
+        choice = body.strip().lower()
 
+        # 🔙 Handle "back"
+        if choice == "back":
+            # go back to previous country list
+            group = state.get("country_group")
+            if not group:
+                return start_flow(from_number)
+
+            country_data = get_countries_by_group(group, page=1)
+            countries = country_data["countries"]
+            total_pages = country_data["total_pages"]
+
+            state["countries"] = countries
+            state["step"] = "country"
+            USER_STATE[from_number] = state
+
+            msg = f"🌍 *Choose a country from {group}* (Page 1 of {total_pages}):\n\n"
+            msg += "\n".join([f"{i+1}. {c.get('flag', '🌐')} {c['name']}" for i, c in enumerate(countries[:10])])
+            msg += "\n\n✏️ Reply with *number* or *country name*."
+            return send_message(msg)
+
+        # Normal package selection
         if choice.isdigit() and 1 <= int(choice) <= len(packages):
             package_type = packages[int(choice) - 1]
         else:
-            package_type = next((p for p in packages if p.lower() == choice.lower()), None)
+            package_type = next((p for p in packages if p.lower() == choice), None)
 
         if not package_type:
             return send_message("⚠️ Invalid package choice. Please reply with a valid number or name.")
 
         state["package_type"] = package_type
         data_sizes = get_data_sizes_by_package(state["country"], package_type)
+
+        # Handle if no plans exist for that package
+        if not data_sizes or all("⚠️" in d for d in data_sizes):
+            msg = (
+                f"⚠️ Sorry, no *{package_type}* plans are available for *{state['country']}*.\n\n"
+                f"Reply *back* to return to packages list."
+            )
+            USER_STATE[from_number] = state
+            return send_message(msg)
+
         state["data_sizes"] = data_sizes
         state["step"] = "data"
         USER_STATE[from_number] = state
@@ -147,7 +230,7 @@ def whatsapp_reply():
         msg += "\n\n✏️ Reply with *number* or *data size name*."
         return send_message(msg)
 
-    # 6️⃣ Data + Price
+    # 📶 DATA SIZE
     if state.get("step") == "data":
         data_sizes = state.get("data_sizes", [])
         choice = body.strip()
@@ -173,57 +256,143 @@ def whatsapp_reply():
             f"You selected *{data_size}* for *{state['country']}*\n"
             f"💰 Price: ₹{price}\n\n"
             "📸 Please upload your *passport image* to continue.\n"
-            "Send it as an *image*, not as a document."
+            "Send it as an *image*, not a document."
         )
         return send_message(msg)
 
-    # 7️⃣ Passport Upload Simulation
+    # # 📤 PASSPORT (simulate upload + Plan ID logic)
+    # if state.get("step") == "passport":
+    #     plan_id = "N/A"
+    #     try:
+    #         resp = requests.get("https://apiesim.connectingit.in/api/product/get-all-product", timeout=30)
+    #         if resp.status_code == 200:
+    #             data = resp.json().get("data", [])
+    #             target_country = state.get("country", "").lower().replace(" ", "")
+    #             target_data = state.get("data", "").lower().replace(" ", "").replace("—", "-").replace("–", "-")
+    #             for p in data:
+    #                 name = str(p.get("name", "")).lower().replace(" ", "").replace("—", "-").replace("–", "-")
+    #                 if target_country in name and target_data.split("-")[0] in name:
+    #                     plan_id = p.get("localPlanId", "N/A")
+    #                     break
+    #     except Exception as e:
+    #         print("[PlanID ERROR]", e)
+
+    #     state["plan_id"] = plan_id
+    #     state["step"] = "payment"
+    #     USER_STATE[from_number] = state
+
+    #     phone = state.get("phone", "N/A")
+    #     country = state.get("country", "N/A")
+    #     data_size = state.get("data", "N/A")
+    #     price = state.get("price", "N/A")
+
+    #     payu_link = generate_payu_link(
+    #         amount=float(price),
+    #         productinfo=f"{data_size} {country} eSIM",
+    #         firstname="WhatsAppUser",
+    #         email="user@example.com",
+    #         phone=phone
+    #     )
+
+    #     msg = (
+    #         f"✅ Passport image received successfully!\n\n"
+    #         f"📋 *Order Summary:*\n"
+    #         f"🌍 Country: *{country}*\n"
+    #         f"📦 Package: *{data_size}*\n"
+    #         f"💰 Price: ₹{price}\n"
+    #         f"📱 Phone: {phone}\n"
+    #         f"🆔 Plan ID: {plan_id}\n\n"
+    #         f"Click below to pay securely:\n{payu_link}"
+    #     )
+    #     return send_message(msg)
+
+    # 7️⃣ Passport Upload + Plan ID + API save
     if state.get("step") == "passport":
         plan_id = "N/A"
+
+        # --- Fetch Plan ID from live API ---
         try:
             resp = requests.get("https://apiesim.connectingit.in/api/product/get-all-product", timeout=30)
             if resp.status_code == 200:
                 data = resp.json().get("data", [])
                 target_country = state.get("country", "").lower().replace(" ", "")
                 target_data = state.get("data", "").lower().replace(" ", "").replace("—", "-").replace("–", "-")
+
                 for p in data:
                     name = str(p.get("name", "")).lower().replace(" ", "").replace("—", "-").replace("–", "-")
                     if target_country in name and target_data.split("-")[0] in name:
                         plan_id = p.get("localPlanId", "N/A")
+                        print(f"[MATCH ✅] Found Plan ID: {plan_id} for {p.get('name')}")
                         break
+            else:
+                print(f"[ERROR] Plan ID API returned {resp.status_code}")
         except Exception as e:
             print("[PlanID ERROR]", e)
 
-        state["plan_id"] = plan_id
-        state["step"] = "payment"
-        USER_STATE[from_number] = state
+        # --- Upload phone + image placeholder to backend ---
+        phone_number_original = state.get("phone", "")
+        phone_number_digits = ''.join(ch for ch in phone_number_original if ch.isdigit())
+        phone_number_final = phone_number_digits[-10:]  # last 10 digits only
 
-        phone = state.get("phone", "N/A")
-        country = state.get("country", "N/A")
-        data_size = state.get("data", "N/A")
-        price = state.get("price", "N/A")
+        print(f"\n================= API UPLOAD LOG =================")
+        print(f"📤 URL: https://apiesim.connectingit.in/api/social/new")
+        print(f"📱 Mobile Sent: {phone_number_final}")
+        print(f"🖼️ File Sent: (placeholder — real image upload requires Twilio media webhook)")
 
-        payu_link = generate_payu_link(
-            amount=float(price),
-            productinfo=f"{data_size} {country} eSIM",
-            firstname="WhatsAppUser",
-            email="user@example.com",
-            phone=phone
-        )
+        try:
+            files = {"passport_file": ("passport.jpg", b"fake_image_data", "image/jpeg")}
+            data = {"mobile": phone_number_final}
+            headers = {"Accept": "application/json"}
 
-        msg = (
-            f"✅ Image received successfully!\n\n"
-            f"📋 *Order Summary:*\n"
-            f"🌍 Country: *{country}*\n"
-            f"📦 Package: *{data_size}*\n"
-            f"💰 Price: ₹{price}\n"
-            f"📱 Phone: {phone}\n"
-            f"🆔 Plan ID: {plan_id}\n\n"
-            f"Click below to pay securely:\n{payu_link}"
-        )
-        return send_message(msg)
+            upload_resp = requests.post(
+                "https://apiesim.connectingit.in/api/social/new",
+                files=files,
+                data=data,
+                headers=headers,
+                timeout=45
+            )
 
-    # 8️⃣ Fallback — restart flow if invalid
+            print(f"🔢 Status Code: {upload_resp.status_code}")
+            print(f"💬 API Response: {upload_resp.text}")
+            if upload_resp.status_code == 200:
+                print("✅ [SUCCESS] Saved successfully to backend!\n")
+            else:
+                print("❌ [FAILED] Upload error. Check API response above.\n")
+        except Exception as e:
+            print(f"[ERROR] Upload failed: {e}")
+        print("==================================================\n")
+
+    # --- Payment summary ---
+    state["plan_id"] = plan_id
+    state["step"] = "payment"
+    USER_STATE[from_number] = state
+
+    phone = state.get("phone", "N/A")
+    country = state.get("country", "N/A")
+    data_size = state.get("data", "N/A")
+    price = state.get("price", "N/A")
+
+    payu_link = generate_payu_link(
+        amount=float(price),
+        productinfo=f"{data_size} {country} eSIM",
+        firstname="WhatsAppUser",
+        email="user@example.com",
+        phone=phone
+    )
+
+    msg = (
+        f"✅ Image received successfully!\n\n"
+        f"📋 *Order Summary:*\n"
+        f"🌍 Country: *{country}*\n"
+        f"📦 Package: *{data_size}*\n"
+        f"💰 Price: ₹{price}\n"
+        f"📱 Phone: {phone}\n"
+        f"🆔 Plan ID: {plan_id}\n\n"
+        f"Click below to pay securely:\n{payu_link}"
+    )
+    return send_message(msg)
+
+    # Default fallback
     return start_flow(from_number)
 
 # ===============================================================
